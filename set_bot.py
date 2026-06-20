@@ -113,7 +113,6 @@ data = {
     "allowed_senders": senders,
     "keyword": keyword,
     "poll_seconds": poll,
-    "cluster_user": "yuxiangchen23",
 }
 os.makedirs(os.path.dirname(CFG), exist_ok=True)
 with open(CFG, "w") as fh:

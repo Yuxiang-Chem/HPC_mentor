@@ -62,7 +62,7 @@ def load_config() -> dict:
 
 def build_status_report(cfg: dict) -> str:
     """Read-only: squeue for all group accounts, grouped into per-user sections."""
-    users = list(hm.ACCOUNTS["all"][1])
+    users = list(hm.ACCOUNTS["a"][1])  # the auto-built "all accounts" view
     rows, err = hm.run_squeue(users)
     if err is not None:
         return f"Could not reach the cluster: {err}"

@@ -7,33 +7,53 @@ It runs locally and SSHes into the cluster over a single multiplexed connection
 (you authenticate once, then every refresh reuses the same socket). Job queries
 use `squeue -u <user>`, so you can watch any account you have permission to see
 and switch between them with a keypress. You can also "watch" a specific job and
-get an email the moment it finishes.
+get an email the moment it finishes, or drive it entirely by email.
 
-## Run
-
-```bash
-cd /Users/chem/tool
-./jobs            # start on Yuxiang's jobs
-./jobs all        # start on the combined view (yuxiang/minghao/yue)
-# or: ./jobs minghao   ./jobs yue
-```
-
-Or, after adding the alias (see below), just `hpcjobs` from anywhere.
-
-A self-contained virtualenv lives in `/Users/chem/tool/.venv`; `./jobs` uses it
-automatically. To recreate it:
+## Install
 
 ```bash
+git clone https://github.com/Yuxiang-Chem/HPC_mentor.git
+cd HPC_mentor
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-### `hpcjobs` shortcut
+## Configure your cluster (do this first)
 
-Add this line to `~/.zshrc`, then open a new terminal (or `source ~/.zshrc`):
+Create `~/.config/hpc_mentor/cluster.json` with your SSH host and accounts. The
+SSH host should be an entry in your `~/.ssh/config`. Each account has a press-key,
+a label, and the usernames to query with `squeue -u`:
+
+```json
+{
+  "ssh_host": "login.your-hpc.example.edu",
+  "accounts": [
+    {"key": "1", "label": "Me",      "users": ["myusername"]},
+    {"key": "2", "label": "Labmate", "users": ["labmate"]}
+  ]
+}
+```
+
+An "all" view (key `a`) that combines every account is added automatically. If
+this file is missing, the tool falls back to generic placeholders.
+
+## Run
 
 ```bash
-alias hpcjobs='/Users/chem/tool/jobs'
+./jobs            # start on the first account
+./jobs all        # combined view of all accounts
+./jobs 2          # start on account "2"
+```
+
+A self-contained virtualenv in `.venv` is used automatically by `./jobs`.
+
+### `hpcjobs` shortcut
+
+Add this to `~/.zshrc` (use the path where you cloned the repo), then open a new
+terminal:
+
+```bash
+alias hpcjobs='/path/to/HPC_mentor/jobs'
 ```
 
 ## Keys
@@ -44,9 +64,7 @@ alias hpcjobs='/Users/chem/tool/jobs'
 | `w` / `space` | toggle email-on-finish for the highlighted job (marks it `●`) |
 | `c` | clear all email-watched jobs |
 | `e` | change the notification email address (type it, Enter) |
-| `1` | Yuxiang (yuxiangchen23) |
-| `2` | Minghao (minghaodeng23) |
-| `3` | Yue (yuesong21) |
+| `1` … | switch to that account (from your `cluster.json`) |
 | `a` | all accounts (adds a User column) |
 | `r` | refresh now |
 | `+` / `-` | change refresh interval (5–120s) |
@@ -62,10 +80,8 @@ connection drops, an error panel is shown and the tool keeps retrying.
 When a watched job leaves the queue, the tool checks its final state with
 `sacct` and emails you the result (COMPLETED / FAILED / CANCELLED / …).
 
-Easiest way — run the setup helper and answer the prompts:
-
 ```bash
-cd /Users/chem/tool && ./set-email
+./set-email
 ```
 
 It asks for the sending address (it auto-detects the SMTP server for QQ, 163/126,
@@ -91,46 +107,38 @@ also leave `smtp_pass` empty and export `HPC_MENTOR_SMTP_PASS` instead.
 The header shows `email on -> …` when configured, or `email off …` otherwise.
 If email is off, watched jobs still show a finish message in the UI.
 
-## Email bot — control the monitor by email (read-only)
+## Email bot — check jobs by email (read-only)
 
-Email a keyword to a mailbox and the bot replies with cluster status. Useful
-when you're away from your terminal.
+Email a secret keyword to a mailbox and the bot replies with **all jobs, grouped
+by user**. Useful when you're away from your terminal.
 
 ```bash
-cd /Users/chem/tool
 ./set-bot     # one-time: bot mailbox, allowed senders, secret keyword
-./hpc-bot     # run it (keep the window open; Mac awake + on VPN)
+./hpc-bot     # run it (keep the window open; machine awake + on VPN)
 ```
 
-**Send a command:** email the bot mailbox with your **secret keyword anywhere**
-in the subject or body, and a command in the **Subject** (or first body line):
-
-| Command | Reply |
-|---------|-------|
-| `status` | your jobs (squeue) |
-| `squeue all` | everyone's jobs |
-| `squeue <username>` | that user's jobs |
-| `sacct <jobid>` | a job's final state |
-| `sinfo` | partition availability |
-| `help` | the command list |
+**To use it:** send an email to the bot mailbox with your **secret keyword**
+anywhere in the subject or body. The reply lists every account's jobs in
+per-user sections.
 
 **Safety model (read-only by design):**
 - A message is acted on **only if** the `From:` address is in your allowed list
   **and** the secret keyword is present. Anything else is ignored silently.
 - The keyword is the real gate — `From:` headers can be spoofed.
-- Commands are a fixed whitelist; arguments are strictly sanitized
-  (`username` = letters/digits/underscore, `jobid` = digits). There is **no**
-  path to arbitrary shell, job submission, or cancellation.
-- It runs on your Mac, so it only answers while the Mac is awake and on VPN.
+- The bot only ever runs `squeue` (read-only). There is **no** path to arbitrary
+  shell, job submission, or cancellation.
+- It runs on your machine, so it only answers while that machine is awake, on
+  VPN, and `./hpc-bot` is running.
 
-Config: `~/.config/hpc_mentor/bot.json` (perms `600`).
+Activity is logged to `~/.config/hpc_mentor/bot.log`. Config:
+`~/.config/hpc_mentor/bot.json` (perms `600`).
 
-## Configure accounts / host
+## Config files
 
-Edit the settings near the top of `hpc_monitor.py`:
+All personal settings live under `~/.config/hpc_mentor/` (never in the repo):
 
-- `SSH_HOST` — the SSH host/alias you connect through (an entry in `~/.ssh/config`).
-- `ACCOUNTS` — the selectable views: a label and the usernames each queries with `squeue -u`.
-- `KEY_TO_ACCOUNT` / `DEFAULT_ACCOUNT` — which key selects which account, and the startup view.
-
-Mirrors the GitHub repo: https://github.com/Yuxiang-Chem/HPC_mentor
+| File | What |
+|------|------|
+| `cluster.json` | SSH host + accounts (usernames) |
+| `config.json` | email-on-finish SMTP settings |
+| `bot.json` | email-bot mailbox, allowed senders, keyword |

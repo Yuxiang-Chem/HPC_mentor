@@ -43,21 +43,48 @@ from rich.text import Text
 
 # --- Configuration ----------------------------------------------------------
 
-# SSH host alias we actually connect through (your own login). Any account's
-# jobs are then queried with `squeue -u <user>` over this one connection.
-SSH_HOST = "login.hpc.xjtlu.edu.cn"
+# Cluster host + accounts are read from this local file so the code itself
+# contains no specific cluster or usernames. See README ("Configure your
+# cluster"). If the file is absent, the generic placeholders below are used.
+CLUSTER_PATH = os.path.expanduser("~/.config/hpc_mentor/cluster.json")
 
-# Selectable views: key -> (label, list of usernames to query).
-ACCOUNTS: dict[str, tuple[str, list[str]]] = {
-    "yuxiang": ("yuxiangchen23 (Yuxiang)", ["yuxiangchen23"]),
-    "minghao": ("minghaodeng23 (Minghao)", ["minghaodeng23"]),
-    "yue": ("yuesong21 (Yue)", ["yuesong21"]),
-    "all": ("all three", ["yuxiangchen23", "minghaodeng23", "yuesong21"]),
+DEFAULT_CLUSTER = {
+    "ssh_host": "login.your-hpc.example.edu",
+    "accounts": [
+        {"key": "1", "label": "Me", "users": ["myusername"]},
+        {"key": "2", "label": "Labmate", "users": ["labmate"]},
+    ],
 }
-DEFAULT_ACCOUNT = "yuxiang"
 
-# Number/letter key -> account key.
-KEY_TO_ACCOUNT = {"1": "yuxiang", "2": "minghao", "3": "yue", "a": "all"}
+
+def _load_cluster() -> dict:
+    try:
+        with open(CLUSTER_PATH) as fh:
+            data = json.load(fh)
+        if data.get("ssh_host") and data.get("accounts"):
+            return data
+    except Exception:
+        pass
+    return DEFAULT_CLUSTER
+
+
+_cluster = _load_cluster()
+
+# SSH host alias we connect through. Any account's jobs are then queried with
+# `squeue -u <user>` over this one connection.
+SSH_HOST = _cluster["ssh_host"]
+
+# Selectable views: press-key -> (label, list of usernames). An "all" view (key
+# "a") that aggregates every account is added automatically.
+ACCOUNTS: dict[str, tuple[str, list[str]]] = {}
+_all_users: list[str] = []
+for _a in _cluster["accounts"]:
+    ACCOUNTS[_a["key"]] = (_a["label"], list(_a["users"]))
+    _all_users.extend(_a["users"])
+ACCOUNTS["a"] = ("all", _all_users)
+
+DEFAULT_ACCOUNT = _cluster["accounts"][0]["key"]
+KEY_TO_ACCOUNT = {k: k for k in ACCOUNTS}  # press-key selects its account directly
 
 # SSH options for connection multiplexing: authenticate once, reuse the socket
 # for every poll so refreshes are fast and never re-prompt for credentials.
@@ -371,7 +398,8 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
     footer1.append(" clear", style="dim")
 
     footer2 = Text()
-    footer2.append("  1 Yuxiang  2 Minghao  3 Yue  a all     ", style="dim")
+    acct_hint = "  " + "  ".join(f"{k} {ACCOUNTS[k][0]}" for k in ACCOUNTS) + "     "
+    footer2.append(acct_hint, style="dim")
     footer2.append("e", style="bold yellow")
     footer2.append(" change email     ", style="dim")
     footer2.append("r", style="bold")
@@ -510,8 +538,15 @@ def main() -> int:
     start_account = DEFAULT_ACCOUNT
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()
+        if arg == "all":
+            arg = "a"
+        if arg not in ACCOUNTS:  # also accept a label, e.g. "minghao"
+            by_label = [k for k, (lbl, _) in ACCOUNTS.items() if lbl.lower() == arg]
+            if by_label:
+                arg = by_label[0]
         if arg not in ACCOUNTS:
-            print(f"Unknown account '{arg}'. Choose from: {', '.join(ACCOUNTS)}")
+            choices = ", ".join(f"{k}={ACCOUNTS[k][0]}" for k in ACCOUNTS)
+            print(f"Unknown account '{arg}'. Choose from: {choices}")
             return 2
         start_account = arg
 
