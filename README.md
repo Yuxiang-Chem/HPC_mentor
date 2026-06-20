@@ -9,6 +9,16 @@ use `squeue -u <user>`, so you can watch any account you have permission to see
 and switch between them with a keypress. You can also "watch" a specific job and
 get an email the moment it finishes, or drive it entirely by email.
 
+## Screenshots
+
+Live monitor (host/email blurred):
+
+![Live monitor](docs/monitor.png)
+
+Email-bot reply — all jobs grouped by user:
+
+![Email bot reply](docs/email-bot.png)
+
 ## Install
 
 ```bash
