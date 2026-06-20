@@ -366,7 +366,6 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
         counts_line = Text("connection error — retrying on next tick", style="red")
     else:
         table = Table(expand=True, header_style="bold")
-        table.add_column(" ", width=2)  # cursor / watch markers
         for col in COLUMNS:
             if col == "User" and not show_user:
                 continue
@@ -377,16 +376,26 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
             r = (r + [""] * len(COLUMNS))[: len(COLUMNS)]
             jobid, user, name, st, t, tl, nodes, part, reason = r
             counter[st] += 1
-            style = STATE_STYLES.get(st, "white")
             is_selected = idx == selected
             watched = jobid in watch
-            marker = ("›" if is_selected else " ") + ("●" if watched else " ")
-            marker_cell = Text(marker, style="bold magenta" if watched else "bold cyan")
-            cells = [marker_cell, jobid]
-            if show_user:
-                cells.append(user)
-            cells += [name, Text(st, style=style), t, tl, nodes, part, reason]
-            table.add_row(*cells, style="on grey23" if is_selected else None)
+
+            if is_selected or watched:
+                # Full-row band (both colors explicit, so it stays readable on light
+                # AND dark terminals). Cursor = Claude light green; a watched job is
+                # marked by a Claude light-red band (no separate marker needed).
+                bar = "bold black on #f38ba8" if watched else "bold black on #a6e3a1"
+                cells = [jobid]
+                if show_user:
+                    cells.append(user)
+                cells += [name, st, t, tl, nodes, part, reason]
+                table.add_row(*cells, style=bar)
+            else:
+                cells = [jobid]
+                if show_user:
+                    cells.append(user)
+                cells += [name, Text(st, style=STATE_STYLES.get(st, "white")),
+                          t, tl, nodes, part, reason]
+                table.add_row(*cells)
 
         body = table if rows else Panel(Text("No jobs in the queue.", style="dim"),
                                         border_style="green")
@@ -410,16 +419,18 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
         status.append("   (Enter = save, Esc = cancel)", style="dim")
     else:
         if watch:
-            status.append(f"● emailing on status change ({len(watch)}): ", style="magenta")
-            status.append(" ".join(sorted(watch)), style="magenta")
+            status.append(f"watching {len(watch)} (red rows) — email on status change: ",
+                          style="#f38ba8")
+            status.append(" ".join(sorted(watch)), style="#f38ba8")
         else:
-            status.append("no jobs selected for email — highlight one and press w", style="dim")
+            status.append("no job watched — highlight one and press w to email on changes",
+                          style="dim")
         if message:
             status.append("    ")
             status.append(message, style="cyan")
 
     footer1 = Text()
-    footer1.append("  ↑/↓ (or j/k) move    ", style="bold")
+    footer1.append("  j / k move    ", style="bold")
     footer1.append("w / space", style="bold magenta")
     footer1.append(" email me on the selected job's status changes    ", style="dim")
     footer1.append("c", style="bold")
@@ -443,13 +454,19 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
 # --- Keyboard thread --------------------------------------------------------
 
 def read_key() -> str:
-    """Read one logical keypress, decoding arrow-key escape sequences."""
+    """Read one logical keypress, decoding arrow-key escape sequences.
+
+    Arrow keys arrive as a 3-byte sequence: ESC then '[' (or 'O' in application
+    cursor mode) then a letter. We wait briefly for the rest of the sequence so a
+    real arrow key isn't mistaken for a bare Esc.
+    """
     ch = sys.stdin.read(1)
     if ch == "\x1b":  # could be Esc alone or the start of an arrow sequence
-        ready, _, _ = select.select([sys.stdin], [], [], 0.0008)
+        ready, _, _ = select.select([sys.stdin], [], [], 0.05)
         if not ready:
             return "ESC"
-        if sys.stdin.read(1) == "[":
+        nxt = sys.stdin.read(1)
+        if nxt in ("[", "O"):
             code = sys.stdin.read(1)
             return {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}.get(code, "")
         return "ESC"
@@ -491,10 +508,10 @@ def keyboard_loop(state: State) -> None:
                 elif key in KEY_TO_ACCOUNT:
                     state.account = KEY_TO_ACCOUNT[key]
                     state.force_refresh = True
-                elif key in ("UP", "k"):
+                elif key == "k":
                     if n:
                         state.selected = max(0, state.selected - 1)
-                elif key in ("DOWN", "j"):
+                elif key == "j":
                     if n:
                         state.selected = min(n - 1, state.selected + 1)
                 elif key in ("w", "W", " "):
