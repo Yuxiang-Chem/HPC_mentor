@@ -11,7 +11,7 @@ get an email the moment it finishes, or drive it entirely by email.
 
 ## Screenshots
 
-Live monitor (host/email blurred):
+Live monitor:
 
 ![Live monitor](docs/monitor.png)
 
