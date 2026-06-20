@@ -198,8 +198,9 @@ class State:
         self.interval = interval
         self.force_refresh = False
         self.quit = False
-        self.watch: set[str] = set()           # JobIDs to email about on finish
+        self.watch: dict[str, str] = {}        # JobID -> last-known state (email on change)
         self.job_ids: list[str] = []           # JobIDs in current display order
+        self.job_states: dict[str, str] = {}   # JobID -> current state (watch baseline)
         self.selected = 0                      # index of the highlighted row
         self.input_mode: str | None = None     # None or 'email'
         self.input_buffer = ""
@@ -263,47 +264,74 @@ def run_sacct(jobids: list[str]) -> dict[str, dict]:
 # --- Watched-job processing (runs in the main loop) -------------------------
 
 def process_watches(state: State, cfg: dict | None) -> None:
+    """Email whenever a watched job's state changes (e.g. PENDING -> RUNNING),
+    and when it leaves the queue (final state via sacct)."""
     with state.lock:
-        watch_ids = sorted(state.watch)
-    if not watch_ids:
+        watched = dict(state.watch)  # jobid -> last-known state
+    if not watched:
         return
 
-    info = run_sacct(watch_ids)
-    for jid in watch_ids:
-        rec = info.get(jid)
-        if not rec or rec["state"] not in TERMINAL_STATES:
-            continue  # still queued/running, or sacct doesn't know it yet
-        with state.lock:
-            state.watch.discard(jid)
-        _notify_finished(state, cfg, jid, rec)
+    # Current states for any watched job still in the queue (all accounts, so it
+    # works regardless of which account is being viewed).
+    rows, err = run_squeue(_all_users)
+    if err is not None:
+        return  # connection problem; try again next tick, watches preserved
+    current = {r[0]: r for r in rows if r}
+
+    for jid, last in watched.items():
+        if jid in current:
+            new_state = (current[jid] + [""] * 9)[3]
+            if new_state and new_state != last:
+                name = (current[jid] + [""] * 9)[2]
+                with state.lock:
+                    if jid in state.watch:
+                        state.watch[jid] = new_state
+                # don't email a first-seen baseline (last == "")
+                if last:
+                    _notify_change(state, cfg, jid, name, last, new_state, final=None)
+        else:
+            # Left the queue -> ask sacct for the final state.
+            rec = run_sacct([jid]).get(jid)
+            if not rec or rec["state"] not in TERMINAL_STATES:
+                continue  # sacct doesn't know yet; keep watching
+            with state.lock:
+                state.watch.pop(jid, None)
+            _notify_change(state, cfg, jid, rec["name"], last, rec["state"], final=rec)
 
 
-def _notify_finished(state: State, cfg: dict | None, jid: str, rec: dict) -> None:
-    name, st = rec["name"], rec["state"]
+def _notify_change(state: State, cfg: dict | None, jid: str, name: str,
+                   old: str, new: str, final: dict | None) -> None:
+    transition = f"{old or '?'} -> {new}"
+    tag = "finished" if final else "changed"
     if cfg is None:
         with state.lock:
-            state.message = f"job {jid} ({name}) finished: {st} -- email not configured"
+            state.message = f"job {jid} {transition} -- email not configured"
         return
 
-    subject = f"[HPC] Job {jid} {name}: {st}"
-    body = (
-        f"Your watched HPC job has finished.\n\n"
-        f"  Job ID:   {jid}\n"
-        f"  Name:     {name}\n"
-        f"  User:     {rec['user']}\n"
-        f"  State:    {rec['raw_state']}\n"
-        f"  Elapsed:  {rec['elapsed']}\n"
-        f"  Ended:    {rec['end']}\n"
-        f"  Cluster:  {SSH_HOST}\n"
-    )
+    subject = f"[HPC] Job {jid} {name}: {transition}"
+    lines = [
+        f"Watched HPC job {tag}.",
+        "",
+        f"  Job ID:   {jid}",
+        f"  Name:     {name}",
+        f"  Change:   {transition}",
+    ]
+    if final:
+        lines += [
+            f"  State:    {final['raw_state']}",
+            f"  Elapsed:  {final['elapsed']}",
+            f"  Ended:    {final['end']}",
+        ]
+    lines += [f"  Cluster:  {SSH_HOST}", ""]
+    body = "\n".join(lines)
 
     def _send() -> None:
         err = send_email(cfg, subject, body)
         with state.lock:
             if err:
-                state.message = f"job {jid} finished ({st}) but email failed: {err}"
+                state.message = f"job {jid} {transition} but email failed: {err}"
             else:
-                state.message = f"job {jid} finished ({st}) -- emailed {cfg['recipient']}"
+                state.message = f"job {jid}: {transition} -- emailed {cfg['recipient']}"
 
     threading.Thread(target=_send, daemon=True).start()
 
@@ -382,7 +410,7 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
         status.append("   (Enter = save, Esc = cancel)", style="dim")
     else:
         if watch:
-            status.append(f"● emailing on finish ({len(watch)}): ", style="magenta")
+            status.append(f"● emailing on status change ({len(watch)}): ", style="magenta")
             status.append(" ".join(sorted(watch)), style="magenta")
         else:
             status.append("no jobs selected for email — highlight one and press w", style="dim")
@@ -393,7 +421,7 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
     footer1 = Text()
     footer1.append("  ↑/↓ (or j/k) move    ", style="bold")
     footer1.append("w / space", style="bold magenta")
-    footer1.append(" email me when selected job finishes    ", style="dim")
+    footer1.append(" email me on the selected job's status changes    ", style="dim")
     footer1.append("c", style="bold")
     footer1.append(" clear", style="dim")
 
@@ -473,11 +501,12 @@ def keyboard_loop(state: State) -> None:
                     if 0 <= state.selected < n:
                         jid = state.job_ids[state.selected]
                         if jid in state.watch:
-                            state.watch.discard(jid)
+                            state.watch.pop(jid, None)
                             state.message = f"stopped watching {jid}"
                         else:
-                            state.watch.add(jid)
-                            state.message = f"will email you when {jid} finishes"
+                            # baseline = current state, so we only email on changes
+                            state.watch[jid] = state.job_states.get(jid, "")
+                            state.message = f"will email you on {jid}'s status changes"
                 elif key in ("c", "C"):
                     state.watch.clear()
                     state.message = "cleared all watched jobs"
@@ -604,6 +633,7 @@ def main() -> int:
                 next_poll = time.monotonic() + interval
                 with state.lock:
                     state.job_ids = [r[0] for r in rows] if rows else []
+                    state.job_states = {r[0]: (r + [""] * 9)[3] for r in rows} if rows else {}
                     if state.selected >= len(state.job_ids):
                         state.selected = max(0, len(state.job_ids) - 1)
                 if error is None:
