@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Convenience launcher for the HPC job monitor.
-# Usage: ./jobs [me|minghao|yue|all]
+# Store your Gmail app password so the monitor can email you when a job finishes.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Prefer the local virtualenv if present, otherwise fall back to python3.
 if [ -x "$HERE/.venv/bin/python" ]; then
   PY="$HERE/.venv/bin/python"
 else
   PY="$(command -v python3)"
 fi
-exec "$PY" "$HERE/hpc_monitor.py" "$@"
+exec "$PY" "$HERE/set_email.py"
