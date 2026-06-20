@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run the HPC email bot (polls the mailbox, replies with cluster status).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$HERE/.venv/bin/python" ]; then PY="$HERE/.venv/bin/python"; else PY="$(command -v python3)"; fi
+exec "$PY" "$HERE/hpc_bot.py"

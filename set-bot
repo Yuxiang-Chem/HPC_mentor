@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Configure the HPC email bot (mailbox, allowed senders, secret keyword).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$HERE/.venv/bin/python" ]; then PY="$HERE/.venv/bin/python"; else PY="$(command -v python3)"; fi
+exec "$PY" "$HERE/set_bot.py"

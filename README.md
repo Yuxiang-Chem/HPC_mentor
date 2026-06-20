@@ -91,6 +91,40 @@ also leave `smtp_pass` empty and export `HPC_MENTOR_SMTP_PASS` instead.
 The header shows `email on -> …` when configured, or `email off …` otherwise.
 If email is off, watched jobs still show a finish message in the UI.
 
+## Email bot — control the monitor by email (read-only)
+
+Email a keyword to a mailbox and the bot replies with cluster status. Useful
+when you're away from your terminal.
+
+```bash
+cd /Users/chem/tool
+./set-bot     # one-time: bot mailbox, allowed senders, secret keyword
+./hpc-bot     # run it (keep the window open; Mac awake + on VPN)
+```
+
+**Send a command:** email the bot mailbox with your **secret keyword anywhere**
+in the subject or body, and a command in the **Subject** (or first body line):
+
+| Command | Reply |
+|---------|-------|
+| `status` | your jobs (squeue) |
+| `squeue all` | everyone's jobs |
+| `squeue <username>` | that user's jobs |
+| `sacct <jobid>` | a job's final state |
+| `sinfo` | partition availability |
+| `help` | the command list |
+
+**Safety model (read-only by design):**
+- A message is acted on **only if** the `From:` address is in your allowed list
+  **and** the secret keyword is present. Anything else is ignored silently.
+- The keyword is the real gate — `From:` headers can be spoofed.
+- Commands are a fixed whitelist; arguments are strictly sanitized
+  (`username` = letters/digits/underscore, `jobid` = digits). There is **no**
+  path to arbitrary shell, job submission, or cancellation.
+- It runs on your Mac, so it only answers while the Mac is awake and on VPN.
+
+Config: `~/.config/hpc_mentor/bot.json` (perms `600`).
+
 ## Configure accounts / host
 
 Edit the settings near the top of `hpc_monitor.py`:
