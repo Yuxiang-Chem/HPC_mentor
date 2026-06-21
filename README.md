@@ -7,7 +7,8 @@ It runs locally and SSHes into the cluster over a single multiplexed connection
 (you authenticate once, then every refresh reuses the same socket). Job queries
 use `squeue -u <user>`, so you can watch any account you have permission to see
 and switch between them with a keypress. You can also "watch" a specific job and
-get an email the moment it finishes, or drive it entirely by email.
+get an email on every status change (and when it finishes), or drive it entirely
+by email.
 
 ## Screenshots
 
@@ -70,9 +71,9 @@ alias hpcjobs='/path/to/HPC_mentor/jobs'
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` (or `j` / `k`) | move the `›` cursor to highlight a job |
-| `w` / `space` | toggle email-on-finish for the highlighted job (marks it `●`) |
-| `c` | clear all email-watched jobs |
+| `j` / `k` | move the cursor down / up to highlight a job |
+| `w` / `space` | watch the highlighted job — email me on every status change |
+| `c` | clear all watched jobs |
 | `e` | change the notification email address (type it, Enter) |
 | `1` … | switch to that account (from your `cluster.json`) |
 | `a` | all accounts (adds a User column) |
@@ -80,15 +81,17 @@ alias hpcjobs='/path/to/HPC_mentor/jobs'
 | `+` / `-` | change refresh interval (5–120s) |
 | `q` | quit |
 
-Default refresh is every 15s. Rows are colored by state (green = running,
-yellow = pending, cyan = completing, red = failed). The highlighted row shows a
-`›` cursor; jobs set to email you on finish show a magenta `●`. If the SSH
-connection drops, an error panel is shown and the tool keeps retrying.
+Default refresh is every 15s. The cursor row is shown with a **green band**;
+a **red band** marks a job you're watching (it stays red as you scroll past).
+Other rows are colored by state (green = running, yellow = pending,
+cyan = completing, red = failed). If the SSH connection drops, an error panel is
+shown and the tool keeps retrying.
 
-## Email-on-finish setup
+## Email notifications setup
 
-When a watched job leaves the queue, the tool checks its final state with
-`sacct` and emails you the result (COMPLETED / FAILED / CANCELLED / …).
+Watch a job (`w`) and you get an email on **every status change** — e.g.
+PENDING → RUNNING — and a final email when it leaves the queue, with the result
+(COMPLETED / FAILED / CANCELLED / …) looked up via `sacct`.
 
 ```bash
 ./set-email
