@@ -81,6 +81,10 @@ SSH_HOST = _cluster["ssh_host"]
 SSH_USER = (_cluster.get("ssh_user") or "").strip()
 SSH_TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_USER else SSH_HOST
 
+# True when no usable cluster.json was found and we fell back to the example
+# placeholder host — there's nothing real to connect to until the user makes one.
+USING_PLACEHOLDER = SSH_HOST == DEFAULT_CLUSTER["ssh_host"]
+
 # Selectable views: press-key -> (label, list of usernames). An "all" view (key
 # "a") that aggregates every account is added automatically.
 ACCOUNTS: dict[str, tuple[str, list[str]]] = {}
@@ -603,6 +607,47 @@ def keyboard_loop(state: State) -> None:
 
 # --- First-run onboarding ---------------------------------------------------
 
+def handle_missing_cluster_config() -> None:
+    """No usable cluster.json was found, so we're on the example placeholder and
+    can't connect to anything. Explain it, show a copy-pasteable example, and
+    offer to build the file interactively. On success we re-exec so the new
+    config is picked up; otherwise we exit."""
+    print("=" * 64)
+    print(" No cluster configuration found.")
+    print("=" * 64)
+    print()
+    print(f" HPC_mentor needs this file to know which cluster to connect to:")
+    print(f"   {CLUSTER_PATH}")
+    print()
+    print(" It looks like this (host, your login name, and accounts to watch):")
+    print()
+    print('   {')
+    print('     "ssh_host": "login.hpc.example.edu",')
+    print('     "ssh_user": "your_login_name",')
+    print('     "accounts": [')
+    print('       {"key": "1", "label": "Me", "users": ["your_login_name"]}')
+    print('     ]')
+    print('   }')
+    print()
+    try:
+        ans = input(" Create it now, step by step? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+
+    if ans in ("", "y", "yes"):
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "set_cluster.py")
+        print()
+        subprocess.run([sys.executable, script])
+        # If a usable config now exists, restart so all the module-level settings
+        # (host, user, accounts) are recomputed from it.
+        if _load_cluster() is not DEFAULT_CLUSTER:
+            print("\nStarting the monitor with your new configuration...\n")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+    else:
+        print(f"\n Create {CLUSTER_PATH} (see the README), then run ./jobs again.")
+        print(" Or run  ./set-cluster  to build it interactively anytime.")
+
+
 def maybe_first_run_email_setup() -> None:
     """On the very first run (no config, not previously declined), offer to set
     up the job-finished email notifications by launching the set-email helper."""
@@ -699,6 +744,16 @@ def maybe_first_run_ssh_setup() -> None:
 # --- Main -------------------------------------------------------------------
 
 def main() -> int:
+    # Before anything else: if there's no real cluster config we're on the
+    # placeholder host and can't connect. Guide the user to create one.
+    if USING_PLACEHOLDER:
+        if not sys.stdin.isatty():
+            print(f"No cluster configuration found. Create {CLUSTER_PATH} "
+                  "(see the README), or run ./set-cluster.")
+            return 2
+        handle_missing_cluster_config()
+        return 1  # only reached if setup was declined/failed; success re-execs
+
     start_account = DEFAULT_ACCOUNT
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()

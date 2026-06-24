@@ -31,9 +31,18 @@ python3 -m venv .venv
 
 ## Configure your cluster (do this first)
 
-Create `~/.config/hpc_mentor/cluster.json` with your SSH host, your login user,
-and the accounts to watch. Each account has a press-key, a label, and the
-usernames to query with `squeue -u`:
+The monitor reads `~/.config/hpc_mentor/cluster.json` for your SSH host, login
+user, and the accounts to watch. The easiest way to create it:
+
+```bash
+./set-cluster
+```
+
+It asks for your SSH host, your login username, and any accounts (labmates) you
+want to watch, then writes the file for you. If you run `./jobs` before this
+exists, it shows the same example and offers to build it on the spot.
+
+To write it by hand instead, the format is:
 
 ```json
 {
@@ -46,11 +55,13 @@ usernames to query with `squeue -u`:
 }
 ```
 
+- Each account has a press-key, a label, and the usernames to query with
+  `squeue -u`.
 - `ssh_user` is the name you log in *as* (the tool connects as `ssh_user@ssh_host`).
   Leave it empty only if you already have a matching `Host` entry in
   `~/.ssh/config` that sets the user.
 - An "all" view (key `a`) that combines every account is added automatically. If
-  this file is missing, the tool falls back to generic placeholders.
+  this file is missing, `./jobs` won't start until you create it.
 
 ## Passwordless login (recommended)
 
@@ -178,6 +189,6 @@ All personal settings live under `~/.config/hpc_mentor/` (never in the repo):
 
 | File | What |
 |------|------|
-| `cluster.json` | SSH host + login user + accounts (usernames) |
+| `cluster.json` | SSH host + login user + accounts (usernames) — make it with `./set-cluster` |
 | `config.json` | email-on-finish SMTP settings |
 | `bot.json` | email-bot mailbox, allowed senders, keyword |

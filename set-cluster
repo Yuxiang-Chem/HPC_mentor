@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Create the cluster config (~/.config/hpc_mentor/cluster.json) interactively.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$HERE/.venv/bin/python" ]; then
+  PY="$HERE/.venv/bin/python"
+else
+  PY="$(command -v python3)"
+fi
+exec "$PY" "$HERE/set_cluster.py"
