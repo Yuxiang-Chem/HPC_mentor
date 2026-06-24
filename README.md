@@ -3,12 +3,12 @@
 A live SLURM job monitor for the terminal, so you don't have to run
 `squeue -u <name>` over and over by hand.
 
-It runs locally and SSHes into the cluster over a single multiplexed connection
-(you authenticate once, then every refresh reuses the same socket). Job queries
-use `squeue -u <user>`, so you can watch any account you have permission to see
-and switch between them with a keypress. You can also "watch" a specific job and
-get an email on every status change (and when it finishes), or drive it entirely
-by email.
+It runs locally and SSHes into your cluster(s) over multiplexed connections (you
+authenticate once per host, then every refresh reuses the same socket). Job
+queries use `squeue -u <user>`, so you can watch any account you have permission
+to see — even across different clusters — and switch between them with a
+keypress. You can also "watch" a specific job and get an email on every status
+change (and when it finishes), or drive it entirely by email.
 
 ## Screenshots
 
@@ -40,7 +40,7 @@ the monitor's usage and keys).
 | `./add-account` | Add another account to watch — same cluster or a different host |
 | `./set-ssh` | Optional: passwordless login via an SSH key |
 | `./set-email` | Optional: email yourself when a watched job finishes |
-| `./jobs` | Start the live monitor (`./jobs all`, `./jobs <key|label>`) |
+| `./jobs` | Start the live monitor (`./jobs all`, or `./jobs <key>` / `<label>`) |
 | `./set-bot` / `./hpc-bot` | Configure / run the read-only email bot |
 
 ## Configure your cluster (do this first)
@@ -132,6 +132,9 @@ The **first time** you run `./jobs` without passwordless login set up, it offers
 to run this for you. Decline and it won't ask again (password login keeps
 working); run `./set-ssh` yourself whenever you want.
 
+`./set-ssh` sets up your **default** cluster. For an account on a *different*
+cluster, run the `ssh-copy-id` command that `./add-account` prints for that host.
+
 ## Run
 
 ```bash
@@ -160,7 +163,7 @@ alias hpcjobs='/path/to/HPC_mentor/jobs'
 | `c` | clear all watched jobs |
 | `e` | change the notification email address (type it, Enter) |
 | `1` … | switch to that account (from your `cluster.json`) |
-| `a` | all accounts (adds a User column) |
+| `a` | all accounts (adds a User column, plus a Host column when they span clusters) |
 | `r` | refresh now |
 | `+` / `-` | change refresh interval (5–120s) |
 | `q` | quit |
