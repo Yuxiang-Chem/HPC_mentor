@@ -31,13 +31,14 @@ python3 -m venv .venv
 
 ## Configure your cluster (do this first)
 
-Create `~/.config/hpc_mentor/cluster.json` with your SSH host and accounts. The
-SSH host should be an entry in your `~/.ssh/config`. Each account has a press-key,
-a label, and the usernames to query with `squeue -u`:
+Create `~/.config/hpc_mentor/cluster.json` with your SSH host, your login user,
+and the accounts to watch. Each account has a press-key, a label, and the
+usernames to query with `squeue -u`:
 
 ```json
 {
   "ssh_host": "login.your-hpc.example.edu",
+  "ssh_user": "myusername",
   "accounts": [
     {"key": "1", "label": "Me",      "users": ["myusername"]},
     {"key": "2", "label": "Labmate", "users": ["labmate"]}
@@ -45,8 +46,33 @@ a label, and the usernames to query with `squeue -u`:
 }
 ```
 
-An "all" view (key `a`) that combines every account is added automatically. If
-this file is missing, the tool falls back to generic placeholders.
+- `ssh_user` is the name you log in *as* (the tool connects as `ssh_user@ssh_host`).
+  Leave it empty only if you already have a matching `Host` entry in
+  `~/.ssh/config` that sets the user.
+- An "all" view (key `a`) that combines every account is added automatically. If
+  this file is missing, the tool falls back to generic placeholders.
+
+## Passwordless login (recommended)
+
+The monitor authenticates **once** at startup and reuses that connection for
+every refresh. That first login can use either a password or an SSH key:
+
+- **Password:** just run `./jobs` — it prompts for your cluster password once,
+  then opens the live view. (You'll re-enter it each time you start the tool.)
+- **SSH key (no password ever):** run the one-time setup below.
+
+```bash
+./set-ssh
+```
+
+It records your login username, creates an SSH key if you don't have one,
+installs your public key on the cluster (you type your password one last time),
+and verifies that login no longer asks for a password. After that, `./jobs`
+connects instantly.
+
+The **first time** you run `./jobs` without passwordless login set up, it offers
+to run this for you. Decline and it won't ask again (password login keeps
+working); run `./set-ssh` yourself whenever you want.
 
 ## Run
 
@@ -152,6 +178,6 @@ All personal settings live under `~/.config/hpc_mentor/` (never in the repo):
 
 | File | What |
 |------|------|
-| `cluster.json` | SSH host + accounts (usernames) |
+| `cluster.json` | SSH host + login user + accounts (usernames) |
 | `config.json` | email-on-finish SMTP settings |
 | `bot.json` | email-bot mailbox, allowed senders, keyword |

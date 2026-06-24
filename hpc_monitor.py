@@ -50,6 +50,7 @@ CLUSTER_PATH = os.path.expanduser("~/.config/hpc_mentor/cluster.json")
 
 DEFAULT_CLUSTER = {
     "ssh_host": "login.your-hpc.example.edu",
+    "ssh_user": "",  # login name on the cluster; empty = use your ~/.ssh/config
     "accounts": [
         {"key": "1", "label": "Me", "users": ["myusername"]},
         {"key": "2", "label": "Labmate", "users": ["labmate"]},
@@ -74,6 +75,12 @@ _cluster = _load_cluster()
 # `squeue -u <user>` over this one connection.
 SSH_HOST = _cluster["ssh_host"]
 
+# Optional login user. If set in cluster.json we connect as user@host, so you
+# don't need a matching ~/.ssh/config entry. If empty, we fall back to plain
+# host and let ssh decide the user (your ~/.ssh/config or local username).
+SSH_USER = (_cluster.get("ssh_user") or "").strip()
+SSH_TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_USER else SSH_HOST
+
 # Selectable views: press-key -> (label, list of usernames). An "all" view (key
 # "a") that aggregates every account is added automatically.
 ACCOUNTS: dict[str, tuple[str, list[str]]] = {}
@@ -86,14 +93,28 @@ ACCOUNTS["a"] = ("all", _all_users)
 DEFAULT_ACCOUNT = _cluster["accounts"][0]["key"]
 KEY_TO_ACCOUNT = {k: k for k in ACCOUNTS}  # press-key selects its account directly
 
-# SSH options for connection multiplexing: authenticate once, reuse the socket
-# for every poll so refreshes are fast and never re-prompt for credentials.
-SSH_OPTS = [
+# Connection multiplexing. We open ONE master connection at startup (interactive,
+# so a password prompt is visible) and every later poll reuses that socket.
+#
+# Master options: used once by ensure_connection() BEFORE the live screen takes
+# over the terminal. BatchMode=no allows an interactive password/2FA prompt.
+SSH_MASTER_OPTS = [
     "-o", "ControlMaster=auto",
     "-o", "ControlPath=~/.ssh/cm-hpcmon-%r@%h:%p",
     "-o", "ControlPersist=10m",
     "-o", "ServerAliveInterval=30",
     "-o", "BatchMode=no",
+]
+
+# Poll options: used for every squeue/sacct call while the live display owns the
+# screen. These attach to the master socket and MUST NEVER prompt — a hidden
+# password prompt here would hang the UI. BatchMode=yes makes ssh fail fast (the
+# UI shows a retry message) instead of blocking if the socket ever drops.
+SSH_OPTS = [
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=~/.ssh/cm-hpcmon-%r@%h:%p",
+    "-o", "ServerAliveInterval=30",
+    "-o", "BatchMode=yes",
 ]
 
 # squeue output columns, pipe-delimited.
@@ -126,6 +147,8 @@ MAX_INTERVAL = 120
 CONFIG_PATH = os.path.expanduser("~/.config/hpc_mentor/config.json")
 # Touched when the user declines first-run email setup, so we don't nag again.
 SKIP_MARKER = os.path.expanduser("~/.config/hpc_mentor/.skip_email_setup")
+# Same idea for the first-run passwordless-SSH offer.
+SSH_SKIP_MARKER = os.path.expanduser("~/.config/hpc_mentor/.skip_ssh_setup")
 
 
 # --- Email config -----------------------------------------------------------
@@ -212,8 +235,43 @@ class State:
 
 # --- SSH / squeue / sacct ----------------------------------------------------
 
+def ensure_connection() -> str | None:
+    """Open the multiplexed SSH master connection once, interactively.
+
+    This runs *before* the live display takes over the terminal and before the
+    keyboard thread grabs stdin, so if the cluster asks for a password (or 2FA)
+    you can see the prompt and type it normally. The connection is then kept open
+    (ControlPersist) and every later poll reuses it without prompting again.
+
+    Returns None on success, or a human-readable error string on failure.
+    """
+    # Already have a live master socket from a previous run? Then we're done.
+    try:
+        check = subprocess.run(
+            ["ssh", *SSH_MASTER_OPTS, "-O", "check", SSH_TARGET],
+            capture_output=True, text=True, timeout=10,
+        )
+        if check.returncode == 0:
+            return None
+    except Exception:
+        pass  # fall through and try to establish it
+
+    # Establish it now, inheriting the real terminal so the password prompt (if
+    # any) is shown and you can type it. `true` is a no-op that just authenticates.
+    try:
+        proc = subprocess.run(["ssh", *SSH_MASTER_OPTS, SSH_TARGET, "true"])
+    except Exception as exc:  # pragma: no cover - defensive
+        return f"failed to launch ssh: {exc}"
+    if proc.returncode != 0:
+        return (
+            f"could not connect to {SSH_TARGET} (ssh exited {proc.returncode}).\n"
+            f"Check it works by hand:  ssh {SSH_TARGET}"
+        )
+    return None
+
+
 def _ssh(remote_cmd: str, timeout: int = 30) -> tuple[str | None, str | None]:
-    cmd = ["ssh", *SSH_OPTS, SSH_HOST, remote_cmd]
+    cmd = ["ssh", *SSH_OPTS, SSH_TARGET, remote_cmd]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -578,6 +636,66 @@ def maybe_first_run_email_setup() -> None:
     print(" Starting the monitor...\n")
 
 
+def _passwordless_works() -> bool:
+    """True if we can already log in without being prompted (an installed key or
+    a live master socket). Uses BatchMode so it fails fast instead of hanging."""
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", SSH_TARGET, "true"],
+            capture_output=True, text=True, timeout=12,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def maybe_first_run_ssh_setup() -> None:
+    """On first run, if passwordless login isn't set up yet, offer to launch the
+    set-ssh helper so the user never has to type their cluster password. Declining
+    is remembered (a skip marker), and password login still works regardless."""
+    if os.path.exists(SSH_SKIP_MARKER):
+        return
+    # Nothing to connect to yet if the host is still the placeholder.
+    if not SSH_HOST or SSH_HOST == "login.your-hpc.example.edu":
+        return
+    if _passwordless_works():
+        return  # already seamless — don't bother the user
+
+    print("=" * 60)
+    print(" Passwordless login isn't set up yet.")
+    print("=" * 60)
+    print()
+    print(" You can log in with your password each time, OR set up an SSH key")
+    print(" once so ./jobs connects instantly with no password.")
+    print(" (You can always do this later by running:  ./set-ssh)")
+    print()
+    try:
+        ans = input(" Set up passwordless SSH login now? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = "n"
+
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    if ans in ("y", "yes"):
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "set_ssh.py")
+        print()
+        subprocess.run([sys.executable, script])
+        print()
+        # set_ssh.py may have written a login user into cluster.json; pick it up
+        # so this same run connects as the right user (globals were computed at
+        # import time, before that file existed/changed).
+        global SSH_USER, SSH_TARGET
+        _c = _load_cluster()
+        SSH_USER = (_c.get("ssh_user") or "").strip()
+        SSH_TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_USER else SSH_HOST
+    else:
+        try:
+            open(SSH_SKIP_MARKER, "w").close()  # remember the choice, don't nag
+        except OSError:
+            pass
+        print(" Skipping. You'll be asked for your password at startup.")
+        print(" Run  ./set-ssh  anytime to enable passwordless login.\n")
+
+
 # --- Main -------------------------------------------------------------------
 
 def main() -> int:
@@ -601,7 +719,23 @@ def main() -> int:
         return 2
 
     maybe_first_run_email_setup()
+    maybe_first_run_ssh_setup()
     cfg, email_status = load_email_config()
+
+    # Authenticate ONCE, here, while we still own a normal terminal — so a
+    # password prompt is visible and typeable. (Doing this later, inside the live
+    # display, would draw the prompt onto the alternate screen and hang.)
+    print("Connecting to the cluster (you may be prompted for your password once)...")
+    conn_err = ensure_connection()
+    if conn_err:
+        print()
+        print("Could not establish the SSH connection:")
+        for line in conn_err.split("\n"):
+            print("  " + line)
+        print()
+        print("Tip: set up a key once so you never need a password again:  ./set-ssh")
+        return 1
+
     state = State(account=start_account, interval=15)
     state.email_configured = cfg is not None
 
@@ -610,8 +744,6 @@ def main() -> int:
     rows: list[list[str]] | None = []
     error: str | None = None
     last_update = datetime.now()
-
-    print("Connecting to the cluster (you may be prompted for credentials once)...")
 
     with Live(refresh_per_second=4, screen=True) as live:
         next_poll = 0.0

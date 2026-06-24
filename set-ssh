@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Set up passwordless SSH login to the cluster (login user + key install).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$HERE/.venv/bin/python" ]; then
+  PY="$HERE/.venv/bin/python"
+else
+  PY="$(command -v python3)"
+fi
+exec "$PY" "$HERE/set_ssh.py"
