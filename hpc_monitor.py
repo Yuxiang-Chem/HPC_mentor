@@ -85,17 +85,49 @@ SSH_TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_USER else SSH_HOST
 # placeholder host — there's nothing real to connect to until the user makes one.
 USING_PLACEHOLDER = SSH_HOST == DEFAULT_CLUSTER["ssh_host"]
 
-# Selectable views: press-key -> (label, list of usernames). An "all" view (key
-# "a") that aggregates every account is added automatically.
-ACCOUNTS: dict[str, tuple[str, list[str]]] = {}
-_all_users: list[str] = []
+# Each account is queried over its own SSH target (user@host). An account that
+# omits ssh_host / ssh_user inherits the top-level defaults, so a single-cluster
+# config keeps working unchanged — but accounts CAN live on different clusters.
+def _target_for(acct: dict) -> str:
+    host = acct.get("ssh_host") or SSH_HOST
+    user = (acct.get("ssh_user") or SSH_USER).strip()
+    return f"{user}@{host}" if user else host
+
+
+# Selectable views. Two parallel maps keyed by press-key:
+#   ACCOUNT_LABELS[key]  -> label shown in the UI
+#   ACCOUNT_SOURCES[key] -> list of (ssh_target, [usernames]) to query and merge
+# A normal account has one source; the "all" view (key "a") has one per cluster.
+ACCOUNT_LABELS: dict[str, str] = {}
+ACCOUNT_SOURCES: dict[str, list[tuple[str, list[str]]]] = {}
 for _a in _cluster["accounts"]:
-    ACCOUNTS[_a["key"]] = (_a["label"], list(_a["users"]))
-    _all_users.extend(_a["users"])
-ACCOUNTS["a"] = ("all", _all_users)
+    ACCOUNT_LABELS[_a["key"]] = _a["label"]
+    ACCOUNT_SOURCES[_a["key"]] = [(_target_for(_a), list(_a["users"]))]
+
+# "all" view: every account's users grouped by target, so we make one squeue
+# call per distinct cluster and merge the results.
+_all_by_target: dict[str, list[str]] = {}
+for _a in _cluster["accounts"]:
+    _bucket = _all_by_target.setdefault(_target_for(_a), [])
+    for _u in _a["users"]:
+        if _u not in _bucket:
+            _bucket.append(_u)
+ACCOUNT_LABELS["a"] = "all"
+ACCOUNT_SOURCES["a"] = [(t, us) for t, us in _all_by_target.items()]
+
+# Distinct SSH targets we might talk to (warmed up once, up front), and whether
+# accounts span more than one host (controls the extra Host column).
+DISTINCT_TARGETS = list(_all_by_target.keys())
+MULTI_HOST = len({t.split("@")[-1] for t in DISTINCT_TARGETS}) > 1
+
+
+def _account_hosts(key: str) -> list[str]:
+    """Distinct hostnames behind an account's sources (for the header/Host col)."""
+    return sorted({t.split("@")[-1] for t, _ in ACCOUNT_SOURCES.get(key, [])})
+
 
 DEFAULT_ACCOUNT = _cluster["accounts"][0]["key"]
-KEY_TO_ACCOUNT = {k: k for k in ACCOUNTS}  # press-key selects its account directly
+KEY_TO_ACCOUNT = {k: k for k in ACCOUNT_LABELS}  # press-key selects its account
 
 # Connection multiplexing. We open ONE master connection at startup (interactive,
 # so a password prompt is visible) and every later poll reuses that socket.
@@ -226,8 +258,10 @@ class State:
         self.force_refresh = False
         self.quit = False
         self.watch: dict[str, str] = {}        # JobID -> last-known state (email on change)
+        self.watch_targets: dict[str, str] = {}  # JobID -> ssh target (for sacct on its host)
         self.job_ids: list[str] = []           # JobIDs in current display order
         self.job_states: dict[str, str] = {}   # JobID -> current state (watch baseline)
+        self.job_targets: dict[str, str] = {}  # JobID -> ssh target it was seen on
         self.selected = 0                      # index of the highlighted row
         self.input_mode: str | None = None     # None or 'email'
         self.input_buffer = ""
@@ -239,20 +273,21 @@ class State:
 
 # --- SSH / squeue / sacct ----------------------------------------------------
 
-def ensure_connection() -> str | None:
-    """Open the multiplexed SSH master connection once, interactively.
+def ensure_connection(target: str) -> str | None:
+    """Open the multiplexed SSH master connection to one target, interactively.
 
     This runs *before* the live display takes over the terminal and before the
-    keyboard thread grabs stdin, so if the cluster asks for a password (or 2FA)
-    you can see the prompt and type it normally. The connection is then kept open
-    (ControlPersist) and every later poll reuses it without prompting again.
+    keyboard thread grabs stdin, so if the cluster asks for a password (or 2FA,
+    or to accept a new host key) you can see the prompt and answer it normally.
+    The connection is then kept open (ControlPersist) and every later poll reuses
+    it without prompting again.
 
     Returns None on success, or a human-readable error string on failure.
     """
     # Already have a live master socket from a previous run? Then we're done.
     try:
         check = subprocess.run(
-            ["ssh", *SSH_MASTER_OPTS, "-O", "check", SSH_TARGET],
+            ["ssh", *SSH_MASTER_OPTS, "-O", "check", target],
             capture_output=True, text=True, timeout=10,
         )
         if check.returncode == 0:
@@ -263,19 +298,39 @@ def ensure_connection() -> str | None:
     # Establish it now, inheriting the real terminal so the password prompt (if
     # any) is shown and you can type it. `true` is a no-op that just authenticates.
     try:
-        proc = subprocess.run(["ssh", *SSH_MASTER_OPTS, SSH_TARGET, "true"])
+        proc = subprocess.run(["ssh", *SSH_MASTER_OPTS, target, "true"])
     except Exception as exc:  # pragma: no cover - defensive
         return f"failed to launch ssh: {exc}"
     if proc.returncode != 0:
         return (
-            f"could not connect to {SSH_TARGET} (ssh exited {proc.returncode}).\n"
-            f"Check it works by hand:  ssh {SSH_TARGET}"
+            f"could not connect to {target} (ssh exited {proc.returncode}).\n"
+            f"Check it works by hand:  ssh {target}"
         )
     return None
 
 
-def _ssh(remote_cmd: str, timeout: int = 30) -> tuple[str | None, str | None]:
-    cmd = ["ssh", *SSH_OPTS, SSH_TARGET, remote_cmd]
+def ensure_connections(targets: list[str]) -> str | None:
+    """Warm up every distinct cluster connection before the live screen starts,
+    so each host's password/host-key prompt is visible. Returns an error string
+    only if NONE of the targets could be reached; if at least one works we warn
+    about the others inline and carry on."""
+    multi = len(targets) > 1
+    errors: list[str] = []
+    for t in targets:
+        if multi:
+            print(f"  · {t}")
+        err = ensure_connection(t)
+        if err:
+            errors.append(err)
+    if errors and len(errors) == len(targets):
+        return "\n".join(errors)
+    for e in errors:  # partial failure: note it but keep going
+        print("  (warning) " + e.splitlines()[0])
+    return None
+
+
+def _ssh(remote_cmd: str, target: str, timeout: int = 30) -> tuple[str | None, str | None]:
+    cmd = ["ssh", *SSH_OPTS, target, remote_cmd]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -287,20 +342,38 @@ def _ssh(remote_cmd: str, timeout: int = 30) -> tuple[str | None, str | None]:
     return proc.stdout, None
 
 
-def run_squeue(users: list[str]) -> tuple[list[list[str]] | None, str | None]:
-    out, err = _ssh(f"squeue -u {','.join(users)} -o '{SQUEUE_FORMAT}' --noheader")
-    if err is not None:
-        return None, err
-    rows = [line.split("|") for line in out.splitlines() if line.strip()]
-    return rows, None
+def run_squeue(sources: list[tuple[str, list[str]]]) -> tuple[list[list[str]] | None, str | None]:
+    """Query each (ssh_target, users) source and merge the rows. Every returned
+    row has its source target appended as a trailing field (row[9]), so the UI
+    can show which host a job is on and sacct can later reach the right cluster."""
+    merged: list[list[str]] = []
+    errors: list[str] = []
+    for target, users in sources:
+        if not users:
+            continue
+        out, err = _ssh(
+            f"squeue -u {','.join(users)} -o '{SQUEUE_FORMAT}' --noheader", target
+        )
+        if err is not None:
+            errors.append(f"{target.split('@')[-1]}: {err}")
+            continue
+        for line in out.splitlines():
+            if line.strip():
+                merged.append(line.split("|") + [target])
+    if not merged and errors:
+        return None, "\n".join(errors)
+    return merged, None
 
 
-def run_sacct(jobids: list[str]) -> dict[str, dict]:
-    """Look up final state of jobs via sacct. Returns {jobid: {...}}."""
+def run_sacct(jobids: list[str], target: str) -> dict[str, dict]:
+    """Look up final state of jobs via sacct on a specific cluster.
+    Returns {jobid: {...}}."""
     if not jobids:
         return {}
     fmt = "JobID,JobName,User,State,Elapsed,End"
-    out, err = _ssh(f"sacct -j {','.join(jobids)} --format={fmt} --noheader -X -P")
+    out, err = _ssh(
+        f"sacct -j {','.join(jobids)} --format={fmt} --noheader -X -P", target
+    )
     if err is not None or not out:
         return {}
     result: dict[str, dict] = {}
@@ -330,39 +403,49 @@ def process_watches(state: State, cfg: dict | None) -> None:
     and when it leaves the queue (final state via sacct)."""
     with state.lock:
         watched = dict(state.watch)  # jobid -> last-known state
+        watch_targets = dict(state.watch_targets)  # jobid -> ssh target
     if not watched:
         return
 
-    # Current states for any watched job still in the queue (all accounts, so it
-    # works regardless of which account is being viewed).
-    rows, err = run_squeue(_all_users)
+    # Current states for any watched job still in the queue, across EVERY cluster
+    # (so watches work regardless of which account is being viewed).
+    rows, err = run_squeue(ACCOUNT_SOURCES["a"])
     if err is not None:
         return  # connection problem; try again next tick, watches preserved
     current = {r[0]: r for r in rows if r}
 
     for jid, last in watched.items():
         if jid in current:
-            new_state = (current[jid] + [""] * 9)[3]
+            row = current[jid]
+            new_state = (row + [""] * 9)[3]
+            target = row[9] if len(row) > 9 else watch_targets.get(jid, "")
+            with state.lock:
+                if jid in state.watch_targets:
+                    state.watch_targets[jid] = target  # keep the host fresh
             if new_state and new_state != last:
-                name = (current[jid] + [""] * 9)[2]
+                name = (row + [""] * 9)[2]
                 with state.lock:
                     if jid in state.watch:
                         state.watch[jid] = new_state
                 # don't email a first-seen baseline (last == "")
                 if last:
-                    _notify_change(state, cfg, jid, name, last, new_state, final=None)
+                    _notify_change(state, cfg, jid, name, last, new_state,
+                                   final=None, host=target.split("@")[-1])
         else:
-            # Left the queue -> ask sacct for the final state.
-            rec = run_sacct([jid]).get(jid)
+            # Left the queue -> ask sacct on the job's own cluster for the result.
+            target = watch_targets.get(jid) or SSH_TARGET
+            rec = run_sacct([jid], target).get(jid)
             if not rec or rec["state"] not in TERMINAL_STATES:
                 continue  # sacct doesn't know yet; keep watching
             with state.lock:
                 state.watch.pop(jid, None)
-            _notify_change(state, cfg, jid, rec["name"], last, rec["state"], final=rec)
+                state.watch_targets.pop(jid, None)
+            _notify_change(state, cfg, jid, rec["name"], last, rec["state"],
+                           final=rec, host=target.split("@")[-1])
 
 
 def _notify_change(state: State, cfg: dict | None, jid: str, name: str,
-                   old: str, new: str, final: dict | None) -> None:
+                   old: str, new: str, final: dict | None, host: str = "") -> None:
     transition = f"{old or '?'} -> {new}"
     tag = "finished" if final else "changed"
     if cfg is None:
@@ -384,7 +467,7 @@ def _notify_change(state: State, cfg: dict | None, jid: str, name: str,
             f"  Elapsed:  {final['elapsed']}",
             f"  Ended:    {final['end']}",
         ]
-    lines += [f"  Cluster:  {SSH_HOST}", ""]
+    lines += [f"  Cluster:  {host or SSH_HOST}", ""]
     body = "\n".join(lines)
 
     def _send() -> None:
@@ -401,8 +484,12 @@ def _notify_change(state: State, cfg: dict | None, jid: str, name: str,
 # --- Rendering --------------------------------------------------------------
 
 def build_view(state: State, rows, error, last_update, email_status) -> Group:
-    label, users = ACCOUNTS[state.account]
-    show_user = len(users) > 1
+    label = ACCOUNT_LABELS[state.account]
+    sources = ACCOUNT_SOURCES[state.account]
+    show_user = sum(len(us) for _, us in sources) > 1
+    acct_hosts = _account_hosts(state.account)
+    show_host = len(acct_hosts) > 1   # only the cross-cluster "all" view
+    host_label = acct_hosts[0] if len(acct_hosts) == 1 else f"{len(acct_hosts)} hosts"
     with state.lock:
         watch = set(state.watch)
         input_mode = state.input_mode
@@ -416,7 +503,7 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
 
     header = Text()
     header.append("HPC jobs", style="bold")
-    header.append(f"  ·  {SSH_HOST}", style="dim")
+    header.append(f"  ·  {host_label}", style="dim")
     header.append("  ·  ", style="dim")
     header.append(label, style="bold cyan")
     header.append(f"  ·  every {state.interval}s", style="dim")
@@ -428,15 +515,19 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
         counts_line = Text("connection error — retrying on next tick", style="red")
     else:
         table = Table(expand=True, header_style="bold")
-        for col in COLUMNS:
-            if col == "User" and not show_user:
-                continue
+        table.add_column("JobID", overflow="fold")
+        if show_user:
+            table.add_column("User", overflow="fold")
+        if show_host:
+            table.add_column("Host", overflow="fold")
+        for col in COLUMNS[2:]:  # Name onward (JobID/User already handled)
             table.add_column(col, overflow="fold")
 
         counter: Counter[str] = Counter()
         for idx, r in enumerate(rows):
-            r = (r + [""] * len(COLUMNS))[: len(COLUMNS)]
-            jobid, user, name, st, t, tl, nodes, part, reason = r
+            host = r[9].split("@")[-1] if len(r) > 9 else ""
+            base = (list(r[:len(COLUMNS)]) + [""] * len(COLUMNS))[: len(COLUMNS)]
+            jobid, user, name, st, t, tl, nodes, part, reason = base
             counter[st] += 1
             is_selected = idx == selected
             watched = jobid in watch
@@ -449,12 +540,16 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
                 cells = [jobid]
                 if show_user:
                     cells.append(user)
+                if show_host:
+                    cells.append(host)
                 cells += [name, st, t, tl, nodes, part, reason]
                 table.add_row(*cells, style=bar)
             else:
                 cells = [jobid]
                 if show_user:
                     cells.append(user)
+                if show_host:
+                    cells.append(host)
                 cells += [name, Text(st, style=STATE_STYLES.get(st, "white")),
                           t, tl, nodes, part, reason]
                 table.add_row(*cells)
@@ -499,7 +594,7 @@ def build_view(state: State, rows, error, last_update, email_status) -> Group:
     footer1.append(" clear", style="dim")
 
     footer2 = Text()
-    acct_hint = "  " + "  ".join(f"{k} {ACCOUNTS[k][0]}" for k in ACCOUNTS) + "     "
+    acct_hint = "  " + "  ".join(f"{k} {ACCOUNT_LABELS[k]}" for k in ACCOUNT_LABELS) + "     "
     footer2.append(acct_hint, style="dim")
     footer2.append("e", style="bold yellow")
     footer2.append(" change email     ", style="dim")
@@ -581,13 +676,16 @@ def keyboard_loop(state: State) -> None:
                         jid = state.job_ids[state.selected]
                         if jid in state.watch:
                             state.watch.pop(jid, None)
+                            state.watch_targets.pop(jid, None)
                             state.message = f"stopped watching {jid}"
                         else:
                             # baseline = current state, so we only email on changes
                             state.watch[jid] = state.job_states.get(jid, "")
+                            state.watch_targets[jid] = state.job_targets.get(jid, "")
                             state.message = f"will email you on {jid}'s status changes"
                 elif key in ("c", "C"):
                     state.watch.clear()
+                    state.watch_targets.clear()
                     state.message = "cleared all watched jobs"
                 elif key in ("e", "E"):
                     if state.email_configured:
@@ -759,12 +857,12 @@ def main() -> int:
         arg = sys.argv[1].lower()
         if arg == "all":
             arg = "a"
-        if arg not in ACCOUNTS:  # also accept a label, e.g. "minghao"
-            by_label = [k for k, (lbl, _) in ACCOUNTS.items() if lbl.lower() == arg]
+        if arg not in ACCOUNT_LABELS:  # also accept a label, e.g. "minghao"
+            by_label = [k for k, lbl in ACCOUNT_LABELS.items() if lbl.lower() == arg]
             if by_label:
                 arg = by_label[0]
-        if arg not in ACCOUNTS:
-            choices = ", ".join(f"{k}={ACCOUNTS[k][0]}" for k in ACCOUNTS)
+        if arg not in ACCOUNT_LABELS:
+            choices = ", ".join(f"{k}={ACCOUNT_LABELS[k]}" for k in ACCOUNT_LABELS)
             print(f"Unknown account '{arg}'. Choose from: {choices}")
             return 2
         start_account = arg
@@ -777,14 +875,18 @@ def main() -> int:
     maybe_first_run_ssh_setup()
     cfg, email_status = load_email_config()
 
-    # Authenticate ONCE, here, while we still own a normal terminal — so a
-    # password prompt is visible and typeable. (Doing this later, inside the live
-    # display, would draw the prompt onto the alternate screen and hang.)
-    print("Connecting to the cluster (you may be prompted for your password once)...")
-    conn_err = ensure_connection()
+    # Authenticate ONCE per cluster, here, while we still own a normal terminal —
+    # so any password/host-key prompt is visible and typeable. (Doing this later,
+    # inside the live display, would draw the prompt onto the alternate screen and
+    # hang.) With accounts on multiple hosts, each host is warmed up in turn.
+    if len(DISTINCT_TARGETS) > 1:
+        print("Connecting to your clusters (you may be prompted once per host)...")
+    else:
+        print("Connecting to the cluster (you may be prompted for your password once)...")
+    conn_err = ensure_connections(DISTINCT_TARGETS)
     if conn_err:
         print()
-        print("Could not establish the SSH connection:")
+        print("Could not establish any SSH connection:")
         for line in conn_err.split("\n"):
             print("  " + line)
         print()
@@ -809,7 +911,7 @@ def main() -> int:
                 do_poll = state.force_refresh
                 state.force_refresh = False
                 interval = state.interval
-                users = ACCOUNTS[state.account][1]
+                sources = ACCOUNT_SOURCES[state.account]
 
             # Apply a pending email-recipient change requested from the keyboard.
             with state.lock:
@@ -832,12 +934,15 @@ def main() -> int:
 
             now = time.monotonic()
             if do_poll or now >= next_poll:
-                rows, error = run_squeue(users)
+                rows, error = run_squeue(sources)
                 last_update = datetime.now()
                 next_poll = time.monotonic() + interval
                 with state.lock:
                     state.job_ids = [r[0] for r in rows] if rows else []
                     state.job_states = {r[0]: (r + [""] * 9)[3] for r in rows} if rows else {}
+                    state.job_targets = {
+                        r[0]: (r[9] if len(r) > 9 else "") for r in rows
+                    } if rows else {}
                     if state.selected >= len(state.job_ids):
                         state.selected = max(0, len(state.job_ids) - 1)
                 if error is None:

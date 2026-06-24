@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Add an HPC account to the monitor (optionally on a different host).
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$HERE/.venv/bin/python" ]; then
+  PY="$HERE/.venv/bin/python"
+else
+  PY="$(command -v python3)"
+fi
+exec "$PY" "$HERE/add_account.py"

@@ -63,6 +63,39 @@ To write it by hand instead, the format is:
 - An "all" view (key `a`) that combines every account is added automatically. If
   this file is missing, `./jobs` won't start until you create it.
 
+### Add more accounts (incl. on a different cluster)
+
+To watch another account, run:
+
+```bash
+./add-account
+```
+
+It asks for a label, the usernames to show, and — if the account lives on a
+**different cluster** — that cluster's SSH host and login user. Same-cluster
+labmates just need their `squeue` username (you stay logged in as yourself).
+
+Under the hood, an account may carry its own `ssh_host` / `ssh_user`; if omitted
+it inherits the top-level defaults. So you can mix clusters in one config:
+
+```json
+{
+  "ssh_host": "login.hpc.xjtlu.edu.cn",
+  "ssh_user": "myname",
+  "accounts": [
+    {"key": "1", "label": "Me",     "users": ["myname"]},
+    {"key": "2", "label": "Labmate","users": ["labmate"]},
+    {"key": "3", "label": "GPU box", "ssh_host": "login.other.edu",
+     "ssh_user": "me2", "users": ["me2"]}
+  ]
+}
+```
+
+`./jobs` warms up each distinct host once at startup (one password prompt per
+host, or none if you've set up keys). The combined **all** view (`a`) queries
+every cluster and merges the jobs, adding a **Host** column so you can tell them
+apart.
+
 ## Passwordless login (recommended)
 
 The monitor authenticates **once** at startup and reuses that connection for
@@ -189,6 +222,6 @@ All personal settings live under `~/.config/hpc_mentor/` (never in the repo):
 
 | File | What |
 |------|------|
-| `cluster.json` | SSH host + login user + accounts (usernames) — make it with `./set-cluster` |
+| `cluster.json` | SSH host + login user + accounts (usernames) — make it with `./set-cluster`, extend with `./add-account` |
 | `config.json` | email-on-finish SMTP settings |
 | `bot.json` | email-bot mailbox, allowed senders, keyword |
