@@ -841,7 +841,27 @@ def maybe_first_run_ssh_setup() -> None:
 
 # --- Main -------------------------------------------------------------------
 
+def print_jobs_help() -> None:
+    print("./jobs — live SLURM job monitor")
+    print()
+    print("Usage:")
+    print("  ./jobs              start on your default account")
+    print("  ./jobs all          combined view of every account")
+    print("  ./jobs <key|label>  start on a specific account, e.g. ./jobs 2  or  ./jobs minghao")
+    print()
+    print("Keys while running:")
+    print("  j/k move   w watch (email on status change)   c clear   1..9/a switch account")
+    print("  e change email   r refresh   +/- speed   q quit")
+    print()
+    print("For every command (setup, add-account, email bot), run:  ./help")
+
+
 def main() -> int:
+    # `./jobs help` / `-h` / `--help`: show usage and exit (works without config).
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
+        print_jobs_help()
+        return 0
+
     # Before anything else: if there's no real cluster config we're on the
     # placeholder host and can't connect. Guide the user to create one.
     if USING_PLACEHOLDER:

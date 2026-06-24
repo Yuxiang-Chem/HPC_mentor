@@ -29,6 +29,20 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+## Commands at a glance
+
+Run `./help` anytime for this overview in your terminal (and `./jobs help` for
+the monitor's usage and keys).
+
+| Command | What it does |
+|---------|--------------|
+| `./set-cluster` | Create your cluster config (SSH host, login user, accounts) |
+| `./add-account` | Add another account to watch — same cluster or a different host |
+| `./set-ssh` | Optional: passwordless login via an SSH key |
+| `./set-email` | Optional: email yourself when a watched job finishes |
+| `./jobs` | Start the live monitor (`./jobs all`, `./jobs <key|label>`) |
+| `./set-bot` / `./hpc-bot` | Configure / run the read-only email bot |
+
 ## Configure your cluster (do this first)
 
 The monitor reads `~/.config/hpc_mentor/cluster.json` for your SSH host, login

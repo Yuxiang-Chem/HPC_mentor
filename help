@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Overview of every HPC_mentor command. Run:  ./help
+set -euo pipefail
+
+# Bold headers only when writing to a real terminal.
+if [ -t 1 ]; then B="$(printf '\033[1m')"; D="$(printf '\033[2m')"; R="$(printf '\033[0m')"
+else B=""; D=""; R=""; fi
+
+cat <<EOF
+${B}HPC_mentor — live SLURM job monitor${R}
+
+SSHes into your cluster(s) and shows a self-refreshing squeue, with optional
+email-when-a-job-finishes and a read-only email bot. Each command below is a
+script in this folder; run it with ./<name>.
+
+${B}SETUP  (run once, in this order)${R}
+  ${B}./set-cluster${R}   Create your cluster config: SSH host, login user, accounts.
+  ${B}./set-ssh${R}       Optional — install an SSH key so login needs no password.
+  ${B}./set-email${R}     Optional — email yourself when a watched job finishes.
+
+${B}EVERYDAY${R}
+  ${B}./jobs${R}          Start the live monitor on your default account.
+  ${B}./jobs all${R}      Combined view of every account (adds a Host column
+                  when accounts span more than one cluster).
+  ${B}./jobs 2${R}        Start on account "2" — or by label, e.g. ./jobs minghao.
+
+${B}MANAGE ACCOUNTS${R}
+  ${B}./add-account${R}   Add another account to watch. Same cluster needs only the
+                  squeue username; a different cluster also asks for its host
+                  and login user.
+
+${B}EMAIL BOT  (check jobs by email, read-only)${R}
+  ${B}./set-bot${R}       Configure the bot mailbox, allowed senders, secret keyword.
+  ${B}./hpc-bot${R}       Run the bot (keep the window open, machine awake + on VPN).
+
+${B}KEYS INSIDE ./jobs${R}
+  j / k   move cursor          w / space  watch selected job (email on change)
+  c       clear all watches    1..9 / a   switch account / all accounts
+  e       change email         r          refresh now
+  +/-     refresh speed        q          quit
+
+${D}Config lives in ~/.config/hpc_mentor/ (cluster.json, config.json, bot.json).
+Full documentation: README.md${R}
+EOF
